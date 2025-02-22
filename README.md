@@ -21,7 +21,7 @@
 
 1. **リポジトリをクローン**
     ```bash
-    git clone https://github.com/yourusername/business-data-insights.git
+    git clone git@github.com:asahi-abc/business-data-insights.git
     cd business-data-insights
     ```
 
