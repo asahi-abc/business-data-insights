@@ -19,7 +19,8 @@ import seaborn as sns
 import joblib
 import os
 import datetime
-import base64
+import io
+import zipfile
 import shap
 
 # タイトルと概要の表示
@@ -61,24 +62,24 @@ else:
     data['sales'] = trend + yearly_seasonality + weekly_seasonality + noise
     data['sales'] = data['sales'].clip(lower=50)  # 最低売上を設定
 
-    # 広告費と顧客数の生成（売上と相関を持たせる）
-    base_advertising = np.random.randint(1000, 5000, size=len(date_rng))
-    data['advertising'] = base_advertising + data['sales'] * \
-        2 + np.random.normal(0, 500, size=len(date_rng))
-
-    base_customers = np.random.randint(20, 100, size=len(date_rng))
-    data['customers'] = base_customers + data['sales'] * \
-        0.1 + np.random.normal(0, 10, size=len(date_rng))
-
-    # 季節性を持つデータを追加
-    data['season_factor'] = yearly_seasonality + 200
-
     # 異常値を追加
     anomaly_indices = np.random.choice(len(date_rng), 10, replace=False)
     data.loc[anomaly_indices, 'sales'] = data.loc[anomaly_indices, 'sales'] * 2
 
-# 日付列の型変換（必要に応じて）
-data['date'] = pd.to_datetime(data['date'])
+    # 広告費と顧客数の生成（売上と相関を持たせる）
+    base_advertising = np.random.randint(1000, 5000, size=len(date_rng))
+    data['advertising'] = base_advertising + data['sales'] * 2 \
+        + np.random.normal(0, 500, size=len(date_rng))
+
+    base_customers = np.random.randint(20, 100, size=len(date_rng))
+    data['customers'] = base_customers + data['sales'] * 0.1 \
+        + np.random.normal(0, 10, size=len(date_rng))
+
+    # 季節性を持つデータを追加
+    data['season_factor'] = yearly_seasonality + 200
+
+    # 日付列の型変換
+    data['date'] = pd.to_datetime(data['date'])
 
 # データフレームの表示前に日付列を文字列に変換（PyArrowの互換性問題を解決）
 
@@ -160,17 +161,21 @@ with tab2:
 
     with col1:
         st.subheader("散布図：広告費と売上の関係")
-        scatter1 = px.scatter(data, x='advertising', y='sales',
-                              trendline='ols',
-                              title='広告費と売上の関係')
+        scatter1 = px.scatter(
+            data, x='advertising', y='sales',
+            trendline='ols',
+            title='広告費と売上の関係'
+        )
         scatter1.update_layout(xaxis_title='広告費', yaxis_title='売上')
         st.plotly_chart(scatter1, use_container_width=True)
 
     with col2:
         st.subheader("散布図：顧客数と売上の関係")
-        scatter2 = px.scatter(data, x='customers', y='sales',
-                              trendline='ols',
-                              title='顧客数と売上の関係')
+        scatter2 = px.scatter(
+            data, x='customers', y='sales',
+            trendline='ols',
+            title='顧客数と売上の関係'
+        )
         scatter2.update_layout(xaxis_title='顧客数', yaxis_title='売上')
         st.plotly_chart(scatter2, use_container_width=True)
 
@@ -192,7 +197,9 @@ with tab2:
 with tab3:
     # 機械学習による売上予測
     st.header("機械学習: 売上予測モデル")
-    st.markdown("**広告費** と **顧客数** を説明変数とし、**売上** を目的変数とした回帰モデルを構築します。")
+    st.markdown(
+        "**広告費** と **顧客数** 、**季節性（オプション）** を説明変数とし、\
+        **売上** を目的変数とした回帰モデルを構築します。")
 
     # 特徴量とターゲットの選択
     feature_cols = ['advertising', 'customers']
@@ -270,13 +277,13 @@ with tab3:
 
     # 評価指標の表示
     st.subheader("モデル評価指標")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("平均二乗誤差 (MSE)", f"{mse:.2f}")
     col2.metric("平方根平均二乗誤差 (RMSE)", f"{rmse:.2f}")
     col3.metric("平均絶対誤差 (MAE)", f"{mae:.2f}")
     col4.metric("決定係数 (R²)", f"{r2:.4f}")
-
-    st.write(f"クロスバリデーション RMSE: {cv_rmse.mean():.2f} ± {cv_rmse.std():.2f}")
+    col5.metric("クロスバリデーション RMSE",
+                f"{cv_rmse.mean():.2f} ± {cv_rmse.std():.2f}")
 
     # 予測結果と実際の売上の比較
     st.subheader("予測結果と実際の売上の比較")
@@ -304,6 +311,7 @@ with tab3:
             '特徴量': features.columns,
             '重要度': model.feature_importances_
         }).sort_values('重要度', ascending=False)
+        st.write(prepare_df_for_display(importance_df))
 
         fig = px.bar(importance_df, x='特徴量', y='重要度',
                      title='特徴量の重要度')
@@ -322,7 +330,7 @@ with tab3:
                      title='モデル係数')
         st.plotly_chart(fig, use_container_width=True)
 
-    # モデルの保存機能
+    # モデルとスケーラーの保存
     if st.button("モデルを保存"):
         # モデル保存用のディレクトリを作成
         if not os.path.exists('models'):
@@ -332,31 +340,38 @@ with tab3:
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = f"sales_prediction_{model_option}_{now}"
         model_filename = f"models/{model_name}.joblib"
+        scaler_filename = f"models/scaler_{model_name}.joblib"
 
-        # モデルを保存
+        # モデルとスケーラーを保存
         joblib.dump(model, model_filename)
-
-        # スケーラーも保存
-        scaler_filename = f"models/scaler_{now}.joblib"
         joblib.dump(scaler, scaler_filename)
 
-        st.success(f"モデルを保存しました: {model_filename}")
+        st.success(f"モデルとスケーラーを保存しました: {model_filename}")
 
-        # ダウンロードリンクを提供
-        def get_binary_file_downloader_html(bin_file, file_label='File'):
-            with open(bin_file, 'rb') as f:
-                data = f.read()
-            bin_str = base64.b64encode(data).decode()
-            href = (
-                f'<a href="data:application/octet-stream;base64,{bin_str}" '
-                f'download="{os.path.basename(bin_file)}">'
-                f'モデルをダウンロード</a>'
-            )
-            return href
+        # ZIPファイルを作成してモデルとスケーラーを格納
+        zip_filename = f"models/model_and_scaler_{model_name}.zip"
 
-        st.markdown(
-            get_binary_file_downloader_html(model_filename),
-            unsafe_allow_html=True
+        # メモリ上でZIPファイルを作成
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # モデルファイルを追加
+            with open(model_filename, 'rb') as model_file:
+                zf.writestr(os.path.basename(
+                    model_filename), model_file.read())
+            # スケーラーファイルを追加
+            with open(scaler_filename, 'rb') as scaler_file:
+                zf.writestr(os.path.basename(
+                    scaler_filename), scaler_file.read())
+
+        # ポインタをファイルの先頭に戻す
+        zip_buffer.seek(0)
+
+        # ダウンロードボタンを表示
+        st.download_button(
+            label="モデルとスケーラーをダウンロード",
+            data=zip_buffer,
+            file_name=f"model_and_scaler_{model_name}.zip",
+            mime="application/zip"
         )
 
     # SHAP値による説明可能性の追加
@@ -397,18 +412,6 @@ with tab3:
                 shap.plots.waterfall(shap_values[sample_idx], show=False)
                 plt.title("個別予測の説明（SHAP値）")
                 st.pyplot(fig)
-
-                # 特徴量間の相互作用
-                if model_option in ["ランダムフォレスト", "勾配ブースティング"]:
-                    st.subheader("特徴量間の相互作用")
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    shap.plots.scatter(
-                        shap_values[:, "advertising"],
-                        color=shap_values,
-                        show=False
-                    )
-                    plt.title("広告費のSHAP値と他の特徴量の相互作用")
-                    st.pyplot(fig)
 
         except Exception as e:
             st.error(f"SHAP値の計算中にエラーが発生しました: {e}")
