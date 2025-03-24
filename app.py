@@ -10,6 +10,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import matplotlib.pyplot as plt
 # 日本語フォントのサポート（インポートするだけで日本語フォントが有効になる）
@@ -22,6 +23,8 @@ import datetime
 import io
 import zipfile
 import shap
+# Prophetモデル用
+from prophet import Prophet
 
 # タイトルと概要の表示
 st.set_page_config(page_title="ビジネスデータ分析ダッシュボード", layout="wide")
@@ -750,95 +753,180 @@ with tab6:
         plt.title("偏自己相関関数（PACF）")
         st.pyplot(fig)
 
-    # ARIMA モデルによる予測
-    st.subheader("ARIMA モデルによる予測")
-
-    # パラメータ設定
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        p = st.slider("自己回帰次数 (p)", 0, 5, 1)
-
-    with col2:
-        d = st.slider("差分次数 (d)", 0, 2, 1)
-
-    with col3:
-        q = st.slider("移動平均次数 (q)", 0, 5, 1)
+    # 予測モデルの選択
+    st.subheader("時系列予測モデル")
+    model_type = st.selectbox(
+        "使用するモデルを選択してください",
+        ["ARIMA", "SARIMA", "Prophet"]
+    )
 
     # 予測期間の設定
     forecast_periods = st.slider("予測期間", 1, 30, 7)
 
-    # ARIMAモデルの構築と予測
+    # モデル固有のパラメータ設定
+    if model_type == "ARIMA":
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            p = st.slider("自己回帰次数 (p)", 0, 5, 1)
+        with col2:
+            d = st.slider("差分次数 (d)", 0, 2, 1)
+        with col3:
+            q = st.slider("移動平均次数 (q)", 0, 5, 1)
+
+    elif model_type == "SARIMA":
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            p = st.slider("自己回帰次数 (p)", 0, 5, 1)
+        with col2:
+            d = st.slider("差分次数 (d)", 0, 2, 1)
+        with col3:
+            q = st.slider("移動平均次数 (q)", 0, 5, 1)
+
+        st.markdown("季節性パラメータ:")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            P = st.slider("季節自己回帰次数 (P)", 0, 2, 1)
+        with col2:
+            D = st.slider("季節差分次数 (D)", 0, 1, 1)
+        with col3:
+            Q = st.slider("季節移動平均次数 (Q)", 0, 2, 1)
+        with col4:
+            m = st.slider("季節周期 (m)", 2, 12, 12)
+
+    elif model_type == "Prophet":
+        col1, col2 = st.columns(2)
+        with col1:
+            yearly_seasonality = st.selectbox("年次季節性", [True, False], index=0)
+        with col2:
+            weekly_seasonality = st.selectbox("週次季節性", [True, False], index=0)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            seasonality_mode = st.selectbox(
+                "季節性モード", ["additive", "multiplicative"], index=0)
+        with col2:
+            changepoint_prior_scale = st.slider(
+                "変化点の柔軟性", 0.001, 0.5, 0.05, step=0.001)
+
+    # モデルの構築と予測
     try:
-        with st.spinner('ARIMAモデルを構築中...'):
-            # モデルの構築
-            model = ARIMA(ts_agg['sales'], order=(p, d, q))
-            model_fit = model.fit()
+        if model_type == "ARIMA":
+            with st.spinner('ARIMAモデルを構築中...'):
+                # モデルの構築
+                model = ARIMA(ts_agg['sales'], order=(p, d, q))
+                model_fit = model.fit()
 
-            # モデルの要約
-            st.write("ARIMAモデルの要約:")
-            st.text(str(model_fit.summary()))
+                # モデルの要約
+                st.write("ARIMAモデルの要約:")
+                st.text(str(model_fit.summary()))
 
-            # 予測
-            forecast = model_fit.forecast(steps=forecast_periods)
+                # 予測
+                forecast = model_fit.forecast(steps=forecast_periods)
 
-            # 予測結果の可視化
-            last_date = ts_agg['date'].iloc[-1]
+        elif model_type == "SARIMA":
+            with st.spinner('SARIMAモデルを構築中...'):
+                # モデルの構築
+                model = SARIMAX(ts_agg['sales'],
+                                order=(p, d, q),
+                                seasonal_order=(P, D, Q, m))
+                model_fit = model.fit(disp=False)
 
-            if agg_period == "日次":
-                forecast_dates = pd.date_range(
-                    start=last_date + pd.Timedelta(days=1),
-                    periods=forecast_periods
+                # モデルの要約
+                st.write("SARIMAモデルの要約:")
+                st.text(str(model_fit.summary()))
+
+                # 予測
+                forecast = model_fit.forecast(steps=forecast_periods)
+
+        elif model_type == "Prophet":
+            with st.spinner('Prophetモデルを構築中...'):
+                # Prophetのデータフォーマットに変換
+                prophet_data = ts_agg.rename(
+                    columns={'date': 'ds', 'sales': 'y'})
+
+                # モデルの初期化と学習
+                model = Prophet(
+                    yearly_seasonality=yearly_seasonality,
+                    weekly_seasonality=weekly_seasonality,
+                    seasonality_mode=seasonality_mode,
+                    changepoint_prior_scale=changepoint_prior_scale
                 )
-            elif agg_period == "週次":
-                forecast_dates = pd.date_range(
-                    start=last_date + pd.Timedelta(weeks=1),
-                    periods=forecast_periods,
-                    freq='W'
-                )
-            else:  # 月次
-                forecast_dates = pd.date_range(
-                    start=last_date + pd.DateOffset(months=1),
-                    periods=forecast_periods,
-                    freq='ME'
-                )
+                model.fit(prophet_data)
 
-            forecast_df = pd.DataFrame({
-                'date': forecast_dates,
-                'sales': forecast
-            })
+                # 将来のデータフレームを作成
+                future = model.make_future_dataframe(
+                    periods=forecast_periods, freq='D')
 
-            # 実績値と予測値の結合
-            combined_df = pd.concat([
-                ts_agg[['date', 'sales']].tail(30),
-                forecast_df
-            ])
+                # 予測
+                forecast_result = model.predict(future)
 
-            # 可視化（日付を文字列に変換）
-            plot_combined_df = prepare_df_for_display(combined_df.copy())
-            fig = px.line(plot_combined_df, x='date', y='sales', title='売上予測')
+                # Prophetコンポーネントのプロット
+                fig_components = model.plot_components(forecast_result)
+                st.write("Prophetモデルの季節性成分:")
+                st.pyplot(fig_components)
 
-            # 最後の実績日付を文字列に変換
-            last_date_str = pd.to_datetime(last_date).strftime('%Y-%m-%d')
-            max_date_str = pd.to_datetime(
-                combined_df['date'].max()).strftime('%Y-%m-%d')
+                # 最後のforecast_periods分のデータを取得
+                forecast = forecast_result.tail(
+                    forecast_periods)['yhat'].values
 
-            fig.add_vrect(
-                x0=last_date_str, x1=max_date_str,
-                fillcolor="lightgray", opacity=0.3,
-                layer="below", line_width=0,
-                annotation_text="予測期間",
-                annotation_position="top left"
+        # 予測結果の可視化
+        last_date = ts_agg['date'].iloc[-1]
+
+        if agg_period == "日次":
+            forecast_dates = pd.date_range(
+                start=last_date + pd.Timedelta(days=1),
+                periods=forecast_periods
             )
-            st.plotly_chart(fig, use_container_width=True, key="forecast_plot")
+        elif agg_period == "週次":
+            forecast_dates = pd.date_range(
+                start=last_date + pd.Timedelta(weeks=1),
+                periods=forecast_periods,
+                freq='W'
+            )
+        else:  # 月次
+            forecast_dates = pd.date_range(
+                start=last_date + pd.DateOffset(months=1),
+                periods=forecast_periods,
+                freq='ME'
+            )
 
-            # 予測値の表示
-            st.subheader("予測結果")
-            st.write(prepare_df_for_display(forecast_df))
+        forecast_df = pd.DataFrame({
+            'date': forecast_dates,
+            'sales': forecast
+        })
+
+        # 実績値と予測値の結合
+        combined_df = pd.concat([
+            ts_agg[['date', 'sales']].tail(30),
+            forecast_df
+        ])
+
+        # 可視化（日付を文字列に変換）
+        plot_combined_df = prepare_df_for_display(combined_df.copy())
+        fig = px.line(plot_combined_df, x='date', y='sales',
+                      title=f'{model_type}モデルによる売上予測')
+
+        # 最後の実績日付を文字列に変換
+        last_date_str = pd.to_datetime(last_date).strftime('%Y-%m-%d')
+        max_date_str = pd.to_datetime(
+            combined_df['date'].max()).strftime('%Y-%m-%d')
+
+        fig.add_vrect(
+            x0=last_date_str, x1=max_date_str,
+            fillcolor="lightgray", opacity=0.3,
+            layer="below", line_width=0,
+            annotation_text="予測期間",
+            annotation_position="top left"
+        )
+        st.plotly_chart(fig, use_container_width=True, key="forecast_plot")
+
+        # 予測値の表示
+        st.subheader("予測結果")
+        st.write(prepare_df_for_display(forecast_df))
 
     except Exception as e:
-        st.error(f"ARIMA予測中にエラーが発生しました: {e}")
-        st.info("データやパラメータによってはARIMAモデルが収束しない場合があります。パラメータを調整してみてください。")
+        st.error(f"{model_type}予測中にエラーが発生しました: {e}")
+        st.info("データやパラメータによってはモデルが収束しない場合があります。パラメータを調整してみてください。")
 
     # 時系列分解の可視化
     st.subheader("時系列分解")
